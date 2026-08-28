@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Python CLI (`cfb-picks`) that predicts college football spread coverage using an Elo power rating blended with a few CFBD efficiency stats via ridge regression, backtested on 2021-2025 historical data, to help pick a weekly 13-game ATS slate plus a "best pick."
+**Goal:** Build a Python CLI (`cfb-picks`) that predicts college football spread coverage using an Elo power rating blended with a few CFBD efficiency stats via ridge regression, backtested out-of-sample on 2021-present historical data, to help pick a weekly 13-game ATS slate plus a "best pick."
 
-**Architecture:** SQLite stores historical games/lines/stats pulled from the CFBD API. An Elo engine computes team ratings game-by-game with season carryover. A feature builder turns any matchup into `[elo_diff, success_rate_diff, ppa_diff, neutral_site]`, using only data available before that game (no lookahead). A ridge regression (trained on all historical games) maps features to a predicted margin; comparing that to the market spread gives an edge, which drives the pick and the best-pick selection. A backtest harness validates ATS accuracy and edge calibration before any live use. Everything is wired together via a Click CLI, with picks and results persisted to SQLite for season-long record tracking.
+**Architecture:** SQLite stores historical games/lines/stats pulled from the CFBD API. An Elo engine computes team ratings game-by-game with season carryover regression and FCS-aware baselines. A feature builder turns any matchup into `[elo_diff, success_rate_diff, ppa_diff, neutral_site]`, using only data available before that game (no lookahead). A ridge regression (trained on all historical FBS-vs-FBS games) maps features to a predicted margin; comparing that to the market spread gives an edge, which drives the pick. A walk-forward backtest harness (training only on seasons prior to the one being evaluated) validates ATS accuracy and produces an edge-size calibration table, which is what actually drives "best pick" selection. Everything is wired together via a Click CLI, with picks and results persisted to SQLite for season-long record tracking.
 
 **Tech Stack:** Python 3.10+, `requests` (CFBD HTTP client), `click` (CLI), `scikit-learn` (Ridge regression), `python-dotenv` (load `CFBD_API_KEY` from `.env`), stdlib `sqlite3` (storage), `pytest` (tests).
 
@@ -14,10 +14,12 @@
 
 - No paid data/odds APIs. All historical data comes from CFBD's free tier (1,000 calls/month) — fetch data at season granularity (one call per endpoint per season), never per-team or per-week, to stay well under the limit.
 - Never scrape Splash. The weekly slate + spread is provided by the user (pasted text/screenshot converted to a CSV) — the app only ever reads a local CSV for the weekly slate.
-- Training/backtest data: seasons 2021-2025 inclusive, with 2020 excluded (COVID-disrupted).
+- Training/backtest data: seasons 2021 through the **current** season inclusive, with 2020 excluded (COVID-disrupted). The season range is computed dynamically from today's date, not hardcoded, so the tool keeps working as seasons roll forward.
 - Single user, local-only. No hosting, no web UI, no multi-user support.
 - Spread sign convention (matches CFBD and standard sportsbook convention): **negative spread = home team favored by that many points.** `market_home_margin = -spread`. `edge = predicted_margin - market_home_margin`; positive edge picks the home team, negative picks the away team.
 - CFBD API confirmed endpoints used: `GET /teams/fbs?year=`, `GET /games?year=&seasonType=`, `GET /lines?year=&seasonType=`, `GET /stats/game/advanced?year=&seasonType=`. Auth via `Authorization: Bearer <CFBD_API_KEY>` header.
+- Backtest calibration is derived from CFBD's consensus closing lines, which can diverge from Splash's contest line (set earlier, off-market). Treat calibration hit-rates as directional guidance, not exact live probabilities — noted in the README.
+- Elo/regression hyperparameters (`K_FACTOR`, `HOME_FIELD_ELO`, `REGRESSION_FACTOR`, ridge `alpha`) are intentionally left as hand-tunable constants rather than an automated search, to keep v1 lean (YAGNI) — reviewed manually against backtest output, documented in the README.
 
 ---
 
@@ -163,6 +165,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'cfb_picks.db'`
 ```python
 # cfb_picks/db.py
 import sqlite3
+from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
@@ -230,8 +233,6 @@ CREATE TABLE IF NOT EXISTS picks (
 
 
 def get_connection(db_path):
-    from pathlib import Path
-
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -781,7 +782,7 @@ git commit -m "feat: add CFBD data ingestion"
 
 **Interfaces:**
 - Consumes: `get_connection`/`init_db` (`cfb_picks.db`).
-- Produces: constants `K_FACTOR=20.0`, `HOME_FIELD_ELO=65.0`, `BASELINE_RATING=1500.0`, `REGRESSION_FACTOR=0.66`; functions `expected_win_prob(rating_diff) -> float`, `mov_multiplier(margin) -> float`, `update_ratings(home_rating, away_rating, home_points, away_points, neutral_site, k=K_FACTOR, home_field=HOME_FIELD_ELO) -> (float, float)`, `regress_to_mean(rating, factor=REGRESSION_FACTOR, mean=BASELINE_RATING) -> float`, `compute_elo_history(conn, seasons) -> None`, `get_rating_as_of(conn, season, week, team) -> float`.
+- Produces: constants `K_FACTOR=20.0`, `HOME_FIELD_ELO=65.0`, `BASELINE_RATING=1500.0`, `FCS_BASELINE_RATING=1200.0`, `REGRESSION_FACTOR=0.66`; functions `expected_win_prob(rating_diff) -> float`, `mov_multiplier(margin) -> float`, `update_ratings(home_rating, away_rating, home_points, away_points, neutral_site, k=K_FACTOR, home_field=HOME_FIELD_ELO) -> (float, float)`, `regress_to_mean(rating, factor=REGRESSION_FACTOR, mean=BASELINE_RATING) -> float`, `is_fbs_team(conn, team) -> bool` (looks up `teams.classification`; a team with no row or a non-"fbs" classification is treated as non-FBS), `compute_elo_history(conn, seasons) -> None` (new/unseen teams start at `BASELINE_RATING` if FBS, else `FCS_BASELINE_RATING`), `get_rating_as_of(conn, season, week, team) -> float` (same classification-aware fallback for teams with no rating history at all).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -791,8 +792,10 @@ import math
 
 import pytest
 
+from cfb_picks.db import get_connection, init_db
 from cfb_picks.elo import (
     BASELINE_RATING,
+    FCS_BASELINE_RATING,
     compute_elo_history,
     expected_win_prob,
     get_rating_as_of,
@@ -800,7 +803,15 @@ from cfb_picks.elo import (
     regress_to_mean,
     update_ratings,
 )
-from cfb_picks.db import get_connection, init_db
+
+GAME_COLUMNS = (
+    "id, season, week, season_type, start_date, completed, neutral_site, "
+    "home_team, away_team, home_points, away_points"
+)
+
+
+def _insert_game(conn, row):
+    conn.execute(f"INSERT INTO games ({GAME_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
 
 
 def test_expected_win_prob_equal_ratings_is_half():
@@ -828,22 +839,14 @@ def test_regress_to_mean_pulls_toward_baseline():
     assert regress_to_mean(1700, factor=0.66, mean=BASELINE_RATING) == pytest.approx(1500 + 0.66 * 200)
 
 
-def _conn_with_games(tmp_path, rows):
+def test_compute_elo_history_updates_ratings(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
-    conn.executemany(
-        "INSERT INTO games (id, season, week, season_type, start_date, completed, "
-        "neutral_site, home_team, away_team, home_points, away_points) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        rows,
+    conn.execute(
+        "INSERT INTO teams (school, classification) VALUES ('Ohio State', 'fbs'), ('Akron', 'fbs')"
     )
+    _insert_game(conn, (1, 2024, 1, "regular", None, 1, 0, "Ohio State", "Akron", 52, 6))
     conn.commit()
-    return conn
-
-
-def test_compute_elo_history_updates_ratings(tmp_path):
-    rows = [(1, 2024, 1, "regular", None, 1, 0, "Ohio State", "Akron", 52, 6)]
-    conn = _conn_with_games(tmp_path, rows)
 
     compute_elo_history(conn, [2024])
 
@@ -851,15 +854,44 @@ def test_compute_elo_history_updates_ratings(tmp_path):
     assert get_rating_as_of(conn, 2024, 2, "Akron") < BASELINE_RATING
 
 
-def test_get_rating_as_of_falls_back_to_baseline_for_unseen_team(tmp_path):
+def test_compute_elo_history_starts_non_fbs_opponents_at_lower_baseline(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
-    assert get_rating_as_of(conn, 2024, 1, "Brand New Team") == BASELINE_RATING
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('Ohio State', 'fbs')")
+    # 'Some FCS School' has no teams row, so it's treated as non-FBS.
+    _insert_game(conn, (1, 2024, 1, "regular", None, 1, 0, "Ohio State", "Some FCS School", 45, 3))
+    conn.commit()
+
+    compute_elo_history(conn, [2024])
+
+    preseason_row = conn.execute(
+        "SELECT rating FROM elo_ratings WHERE season = 2024 AND week = 0 AND team = 'Some FCS School'"
+    ).fetchone()
+    assert preseason_row["rating"] == FCS_BASELINE_RATING
+
+
+def test_get_rating_as_of_returns_fbs_baseline_for_known_fbs_team(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('Ohio State', 'fbs')")
+    conn.commit()
+    assert get_rating_as_of(conn, 2024, 1, "Ohio State") == BASELINE_RATING
+
+
+def test_get_rating_as_of_returns_fcs_baseline_for_unknown_team(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    assert get_rating_as_of(conn, 2024, 1, "Random FCS School") == FCS_BASELINE_RATING
 
 
 def test_get_rating_as_of_carries_prior_season_forward(tmp_path):
-    rows = [(1, 2023, 15, "regular", None, 1, 0, "Ohio State", "Akron", 52, 6)]
-    conn = _conn_with_games(tmp_path, rows)
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO teams (school, classification) VALUES ('Ohio State', 'fbs'), ('Akron', 'fbs')"
+    )
+    _insert_game(conn, (1, 2023, 15, "regular", None, 1, 0, "Ohio State", "Akron", 52, 6))
+    conn.commit()
 
     compute_elo_history(conn, [2023])
 
@@ -882,6 +914,7 @@ import math
 K_FACTOR = 20.0
 HOME_FIELD_ELO = 65.0
 BASELINE_RATING = 1500.0
+FCS_BASELINE_RATING = 1200.0
 REGRESSION_FACTOR = 0.66
 
 
@@ -918,6 +951,17 @@ def regress_to_mean(rating, factor=REGRESSION_FACTOR, mean=BASELINE_RATING):
     return mean + factor * (rating - mean)
 
 
+def is_fbs_team(conn, team):
+    row = conn.execute(
+        "SELECT classification FROM teams WHERE school = ?", (team,)
+    ).fetchone()
+    return bool(row and row["classification"] == "fbs")
+
+
+def _baseline_rating(conn, team):
+    return BASELINE_RATING if is_fbs_team(conn, team) else FCS_BASELINE_RATING
+
+
 def compute_elo_history(conn, seasons):
     conn.execute("DELETE FROM elo_ratings")
     ratings = {}
@@ -940,8 +984,8 @@ def compute_elo_history(conn, seasons):
 
         for game in games:
             home, away = game["home_team"], game["away_team"]
-            ratings.setdefault(home, BASELINE_RATING)
-            ratings.setdefault(away, BASELINE_RATING)
+            ratings.setdefault(home, _baseline_rating(conn, home))
+            ratings.setdefault(away, _baseline_rating(conn, away))
             new_home, new_away = update_ratings(
                 ratings[home],
                 ratings[away],
@@ -977,7 +1021,10 @@ def get_rating_as_of(conn, season, week, team):
         "ORDER BY season DESC, week DESC LIMIT 1",
         (season, team),
     ).fetchone()
-    return row["rating"] if row else BASELINE_RATING
+    if row:
+        return row["rating"]
+
+    return _baseline_rating(conn, team)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -989,7 +1036,7 @@ Expected: PASS
 
 ```bash
 git add cfb_picks/elo.py tests/test_elo.py
-git commit -m "feat: add Elo rating engine"
+git commit -m "feat: add Elo rating engine with FCS-aware baselines"
 ```
 
 ---
@@ -1117,8 +1164,8 @@ git commit -m "feat: add feature builder"
 - Test: `tests/test_model.py`
 
 **Interfaces:**
-- Consumes: `build_features` (`cfb_picks.features`).
-- Produces: `FEATURE_ORDER = ["elo_diff", "success_rate_diff", "ppa_diff", "neutral_site"]`, `ModelWeights` dataclass (`intercept: float`, `coefficients: dict[str, float]`), `train_model(feature_dicts, margins, alpha=1.0) -> ModelWeights`, `predict_margin(weights, features) -> float`, `save_model(weights, path) -> None`, `load_model(path) -> ModelWeights`, `gather_training_data(conn, seasons) -> (list[dict], list[float])`.
+- Consumes: `build_features` (`cfb_picks.features`), `is_fbs_team` (`cfb_picks.elo`).
+- Produces: `FEATURE_ORDER = ["elo_diff", "success_rate_diff", "ppa_diff", "neutral_site"]`, `ModelWeights` dataclass (`intercept: float`, `coefficients: dict[str, float]`), `train_model(feature_dicts, margins, alpha=1.0) -> ModelWeights`, `predict_margin(weights, features) -> float`, `save_model(weights, path) -> None`, `load_model(path) -> ModelWeights`, `gather_training_data(conn, seasons) -> (list[dict], list[float])` (excludes any game where either team is not FBS, since CFBD games include FBS-vs-FCS matchups that would otherwise skew the regression target).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1172,6 +1219,7 @@ def test_save_and_load_model_roundtrip(tmp_path):
 def test_gather_training_data_builds_features_and_margins(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('A', 'fbs'), ('B', 'fbs')")
     conn.execute(
         "INSERT INTO games (id, season, week, season_type, start_date, completed, "
         "neutral_site, home_team, away_team, home_points, away_points) "
@@ -1183,6 +1231,23 @@ def test_gather_training_data_builds_features_and_margins(tmp_path):
 
     assert margins == [20]
     assert set(feature_dicts[0].keys()) == set(FEATURE_ORDER)
+
+
+def test_gather_training_data_excludes_fbs_vs_fcs_games(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('A', 'fbs')")
+    conn.execute(
+        "INSERT INTO games (id, season, week, season_type, start_date, completed, "
+        "neutral_site, home_team, away_team, home_points, away_points) "
+        "VALUES (1, 2024, 1, 'regular', NULL, 1, 0, 'A', 'Some FCS School', 50, 3)"
+    )
+    conn.commit()
+
+    feature_dicts, margins = gather_training_data(conn, [2024])
+
+    assert margins == []
+    assert feature_dicts == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1199,6 +1264,7 @@ from dataclasses import asdict, dataclass
 
 from sklearn.linear_model import Ridge
 
+from .elo import is_fbs_team
 from .features import build_features
 
 FEATURE_ORDER = ["elo_diff", "success_rate_diff", "ppa_diff", "neutral_site"]
@@ -1246,6 +1312,8 @@ def gather_training_data(conn, seasons):
 
     feature_dicts, margins = [], []
     for game in games:
+        if not (is_fbs_team(conn, game["home_team"]) and is_fbs_team(conn, game["away_team"])):
+            continue
         features = build_features(
             conn,
             game["season"],
@@ -1273,15 +1341,97 @@ git commit -m "feat: add ridge regression model training/persistence"
 
 ---
 
-## Task 9: Pick logic (edge + best pick)
+## Task 9: Calibration module
+
+**Files:**
+- Create: `cfb_picks/calibration.py`
+- Test: `tests/test_calibration.py`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces: `edge_bucket(abs_edge) -> str` (buckets: `"0-2"` for `< 2`, `"2-5"` for `< 5`, `"5-8"` for `< 8`, `"8+"` otherwise), `save_calibration(calibration, path) -> None`, `load_calibration(path) -> dict`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_calibration.py
+from cfb_picks.calibration import edge_bucket, load_calibration, save_calibration
+
+
+def test_edge_bucket_boundaries():
+    assert edge_bucket(0) == "0-2"
+    assert edge_bucket(1.9) == "0-2"
+    assert edge_bucket(2) == "2-5"
+    assert edge_bucket(4.9) == "2-5"
+    assert edge_bucket(5) == "5-8"
+    assert edge_bucket(7.9) == "5-8"
+    assert edge_bucket(8) == "8+"
+    assert edge_bucket(100) == "8+"
+
+
+def test_save_and_load_calibration_roundtrip(tmp_path):
+    calibration = {"0-2": 0.51, "2-5": 0.55, "5-8": 0.61, "8+": 0.58}
+    path = tmp_path / "calibration.json"
+
+    save_calibration(calibration, path)
+
+    assert load_calibration(path) == calibration
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_calibration.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'cfb_picks.calibration'`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# cfb_picks/calibration.py
+import json
+
+EDGE_BUCKETS = [(2, "0-2"), (5, "2-5"), (8, "5-8"), (float("inf"), "8+")]
+
+
+def edge_bucket(abs_edge):
+    for upper, name in EDGE_BUCKETS:
+        if abs_edge < upper:
+            return name
+    return EDGE_BUCKETS[-1][1]
+
+
+def save_calibration(calibration, path):
+    with open(path, "w") as f:
+        json.dump(calibration, f)
+
+
+def load_calibration(path):
+    with open(path) as f:
+        return json.load(f)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_calibration.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add cfb_picks/calibration.py tests/test_calibration.py
+git commit -m "feat: add edge calibration module"
+```
+
+---
+
+## Task 10: Pick logic (edge + calibrated best pick)
 
 **Files:**
 - Create: `cfb_picks/predict.py`
 - Test: `tests/test_predict.py`
 
 **Interfaces:**
-- Consumes: nothing from earlier tasks (pure functions over plain dicts).
-- Produces: `Pick` dataclass (`home_team`, `away_team`, `spread`, `predicted_margin`, `edge`, `pick_team`, `is_best_pick`), `compute_edge(predicted_margin, spread) -> float`, `make_picks(games: list[dict]) -> list[Pick]` (each `games` dict has `home_team`, `away_team`, `spread`, `predicted_margin`; exactly one `Pick` gets `is_best_pick=True`, the one with the largest `abs(edge)`).
+- Consumes: `edge_bucket` (`cfb_picks.calibration`).
+- Produces: `Pick` dataclass (`home_team`, `away_team`, `spread`, `predicted_margin`, `edge`, `pick_team`, `is_best_pick`), `compute_edge(predicted_margin, spread) -> float`, `make_picks(games: list[dict], calibration: dict | None = None) -> list[Pick]` (each `games` dict has `home_team`, `away_team`, `spread`, `predicted_margin`). Best pick is the one maximizing `abs(edge) * calibration[edge_bucket(abs(edge))]` when `calibration` is provided and has a value for that bucket; otherwise falls back to plain `abs(edge)`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1300,7 +1450,7 @@ def test_compute_edge_home_underdog():
     assert compute_edge(predicted_margin=-1, spread=6) == pytest.approx(5)
 
 
-def test_make_picks_selects_side_and_best_pick():
+def test_make_picks_selects_side_and_best_pick_by_raw_edge_without_calibration():
     games = [
         {"home_team": "A", "away_team": "B", "spread": -3, "predicted_margin": 10},
         {"home_team": "C", "away_team": "D", "spread": 6, "predicted_margin": -1},
@@ -1312,6 +1462,21 @@ def test_make_picks_selects_side_and_best_pick():
     assert picks[0].edge == pytest.approx(7)
     assert picks[1].pick_team == "C"
     assert picks[1].edge == pytest.approx(5)
+    assert picks[0].is_best_pick is True
+    assert picks[1].is_best_pick is False
+
+
+def test_make_picks_best_pick_uses_calibration_when_provided():
+    games = [
+        {"home_team": "A", "away_team": "B", "spread": -1, "predicted_margin": 7},  # edge 6 -> "5-8"
+        {"home_team": "C", "away_team": "D", "spread": -1, "predicted_margin": 10},  # edge 9 -> "8+"
+    ]
+    calibration = {"5-8": 0.9, "8+": 0.3}
+
+    picks = make_picks(games, calibration=calibration)
+
+    # Raw edge favors the second game (9 > 6), but calibrated confidence
+    # (6*0.9=5.4 vs 9*0.3=2.7) favors the first.
     assert picks[0].is_best_pick is True
     assert picks[1].is_best_pick is False
 ```
@@ -1326,6 +1491,8 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'cfb_picks.predict'`
 ```python
 # cfb_picks/predict.py
 from dataclasses import dataclass
+
+from .calibration import edge_bucket
 
 
 @dataclass
@@ -1344,7 +1511,14 @@ def compute_edge(predicted_margin, spread):
     return predicted_margin - market_home_margin
 
 
-def make_picks(games):
+def _confidence_score(pick, calibration):
+    if not calibration:
+        return abs(pick.edge)
+    win_rate = calibration.get(edge_bucket(abs(pick.edge)))
+    return abs(pick.edge) * win_rate if win_rate is not None else abs(pick.edge)
+
+
+def make_picks(games, calibration=None):
     picks = []
     for game in games:
         edge = compute_edge(game["predicted_margin"], game["spread"])
@@ -1361,7 +1535,7 @@ def make_picks(games):
             )
         )
     if picks:
-        best = max(picks, key=lambda pick: abs(pick.edge))
+        best = max(picks, key=lambda pick: _confidence_score(pick, calibration))
         best.is_best_pick = True
     return picks
 ```
@@ -1375,20 +1549,20 @@ Expected: PASS
 
 ```bash
 git add cfb_picks/predict.py tests/test_predict.py
-git commit -m "feat: add pick/edge/best-pick logic"
+git commit -m "feat: add pick/edge logic with calibrated best-pick selection"
 ```
 
 ---
 
-## Task 10: Backtest harness
+## Task 11: Walk-forward backtest harness
 
 **Files:**
 - Create: `cfb_picks/backtest.py`
 - Test: `tests/test_backtest.py`
 
 **Interfaces:**
-- Consumes: `build_features` (`cfb_picks.features`), `predict_margin`/`ModelWeights` (`cfb_picks.model`), `compute_edge` (`cfb_picks.predict`).
-- Produces: `run_backtest(conn, weights, seasons) -> list[dict]` (each dict has `edge: float`, `correct: bool`), `summarize_backtest(results) -> dict` (`overall_accuracy`, `by_edge_bucket` with keys `"0-2"`, `"2-5"`, `"5-8"`, `"8+"`, `n`).
+- Consumes: `edge_bucket` (`cfb_picks.calibration`), `is_fbs_team` (`cfb_picks.elo`), `build_features` (`cfb_picks.features`), `gather_training_data`/`predict_margin`/`train_model` (`cfb_picks.model`), `compute_edge` (`cfb_picks.predict`).
+- Produces: `run_backtest(conn, seasons) -> list[dict]` (each dict has `edge: float`, `correct: bool`). For each season being evaluated, a regression model is trained **only on strictly earlier seasons** in the given list (out-of-sample) — the earliest season in the list is skipped since it has no prior training data. `summarize_backtest(results) -> dict` (`overall_accuracy`, `by_edge_bucket` — only buckets that actually occurred, `n`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1398,46 +1572,44 @@ import pytest
 
 from cfb_picks.backtest import run_backtest, summarize_backtest
 from cfb_picks.db import get_connection, init_db
-from cfb_picks.model import ModelWeights
+from cfb_picks.elo import compute_elo_history
+
+GAME_COLUMNS = (
+    "id, season, week, season_type, start_date, completed, neutral_site, "
+    "home_team, away_team, home_points, away_points"
+)
 
 
-def test_run_backtest_marks_correct_picks(tmp_path):
+def _insert_game(conn, row):
+    conn.execute(f"INSERT INTO games ({GAME_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
+
+
+def test_run_backtest_trains_only_on_prior_seasons(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
-    conn.execute(
-        "INSERT INTO games (id, season, week, season_type, start_date, completed, "
-        "neutral_site, home_team, away_team, home_points, away_points) "
-        "VALUES (1, 2024, 1, 'regular', NULL, 1, 0, 'A', 'B', 30, 10)"
-    )
-    conn.execute("INSERT INTO betting_lines (game_id, provider, spread) VALUES (1, 'consensus', -3)")
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('A', 'fbs'), ('B', 'fbs')")
+    _insert_game(conn, (1, 2023, 1, "regular", None, 1, 0, "A", "B", 50, 0))
+    _insert_game(conn, (2, 2024, 1, "regular", None, 1, 0, "A", "B", 30, 10))
+    conn.execute("INSERT INTO betting_lines (game_id, provider, spread) VALUES (2, 'consensus', -3)")
     conn.commit()
+    compute_elo_history(conn, [2023, 2024])
 
-    # Zero coefficients -> predicted_margin is always the intercept (25).
-    # market_home_margin = 3, edge = 22 -> pick home. Actual margin 20 > 3 -> home covered -> correct.
-    weights = ModelWeights(
-        intercept=25,
-        coefficients={"elo_diff": 0, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0},
-    )
+    results = run_backtest(conn, [2023, 2024])
 
-    results = run_backtest(conn, weights, [2024])
-
+    # 2023 has no prior season to train on and is skipped; only 2024 is evaluated.
     assert len(results) == 1
-    assert results[0]["correct"] is True
-    assert results[0]["edge"] == pytest.approx(22)
 
 
 def test_run_backtest_skips_games_without_a_market_spread(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
-    conn.execute(
-        "INSERT INTO games (id, season, week, season_type, start_date, completed, "
-        "neutral_site, home_team, away_team, home_points, away_points) "
-        "VALUES (1, 2024, 1, 'regular', NULL, 1, 0, 'A', 'B', 30, 10)"
-    )
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('A', 'fbs'), ('B', 'fbs')")
+    _insert_game(conn, (1, 2023, 1, "regular", None, 1, 0, "A", "B", 50, 0))
+    _insert_game(conn, (2, 2024, 1, "regular", None, 1, 0, "A", "B", 30, 10))
     conn.commit()
-    weights = ModelWeights(intercept=0, coefficients={"elo_diff": 0, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0})
+    compute_elo_history(conn, [2023, 2024])
 
-    results = run_backtest(conn, weights, [2024])
+    results = run_backtest(conn, [2023, 2024])
 
     assert results == []
 
@@ -1471,8 +1643,10 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'cfb_picks.backtest'`
 
 ```python
 # cfb_picks/backtest.py
+from .calibration import edge_bucket
+from .elo import is_fbs_team
 from .features import build_features
-from .model import predict_margin
+from .model import gather_training_data, predict_margin, train_model
 from .predict import compute_edge
 
 
@@ -1484,16 +1658,16 @@ def _market_spread(conn, game_id):
     return row["spread"] if row else None
 
 
-def run_backtest(conn, weights, seasons):
-    placeholders = ",".join("?" * len(seasons))
+def _evaluate_season(conn, weights, season):
     games = conn.execute(
-        f"SELECT * FROM games WHERE season IN ({placeholders}) AND completed = 1 "
-        "ORDER BY season, week",
-        seasons,
+        "SELECT * FROM games WHERE season = ? AND completed = 1 ORDER BY week", (season,)
     ).fetchall()
 
     results = []
     for game in games:
+        if not (is_fbs_team(conn, game["home_team"]) and is_fbs_team(conn, game["away_team"])):
+            continue
+
         spread = _market_spread(conn, game["id"])
         if spread is None:
             continue
@@ -1517,22 +1691,32 @@ def run_backtest(conn, weights, seasons):
     return results
 
 
+def run_backtest(conn, seasons):
+    sorted_seasons = sorted(seasons)
+    results = []
+    for index, season in enumerate(sorted_seasons):
+        training_seasons = sorted_seasons[:index]
+        if not training_seasons:
+            continue  # no prior seasons to train on; can't evaluate out-of-sample
+
+        feature_dicts, margins = gather_training_data(conn, training_seasons)
+        if not feature_dicts:
+            continue
+
+        weights = train_model(feature_dicts, margins)
+        results.extend(_evaluate_season(conn, weights, season))
+
+    return results
+
+
 def summarize_backtest(results):
     if not results:
         return {"overall_accuracy": None, "by_edge_bucket": {}, "n": 0}
 
     overall = sum(r["correct"] for r in results) / len(results)
-    buckets = {"0-2": [], "2-5": [], "5-8": [], "8+": []}
+    buckets = {}
     for r in results:
-        abs_edge = abs(r["edge"])
-        if abs_edge < 2:
-            buckets["0-2"].append(r["correct"])
-        elif abs_edge < 5:
-            buckets["2-5"].append(r["correct"])
-        elif abs_edge < 8:
-            buckets["5-8"].append(r["correct"])
-        else:
-            buckets["8+"].append(r["correct"])
+        buckets.setdefault(edge_bucket(abs(r["edge"])), []).append(r["correct"])
 
     by_bucket = {
         name: (sum(values) / len(values) if values else None)
@@ -1550,12 +1734,12 @@ Expected: PASS
 
 ```bash
 git add cfb_picks/backtest.py tests/test_backtest.py
-git commit -m "feat: add backtest harness"
+git commit -m "feat: add out-of-sample walk-forward backtest harness"
 ```
 
 ---
 
-## Task 11: Results grading
+## Task 12: Results grading
 
 **Files:**
 - Create: `cfb_picks/results.py`
@@ -1668,7 +1852,7 @@ git commit -m "feat: add weekly results grading"
 
 ---
 
-## Task 12: Season history reporting
+## Task 13: Season history reporting
 
 **Files:**
 - Create: `cfb_picks/history.py`
@@ -1769,40 +1953,52 @@ git commit -m "feat: add season history reporting"
 
 ---
 
-## Task 13: Config module
+## Task 14: Config module
 
 **Files:**
 - Create: `cfb_picks/config.py`
 - Test: `tests/test_config.py`
 
 **Interfaces:**
-- Produces: `DB_PATH: Path`, `MODEL_PATH: Path`, `SEASONS: list[int]` (`[2021, 2022, 2023, 2024, 2025]`), all overridable via `CFB_PICKS_DB` / `CFB_PICKS_MODEL` env vars. Loads `.env` via `python-dotenv` if present.
+- Produces: `DB_PATH: Path`, `MODEL_PATH: Path`, `CALIBRATION_PATH: Path`, `SEASONS: list[int]` — computed dynamically as every year from 2021 through the current calendar year, excluding 2020, so the range grows automatically each season without a code change. All three paths are overridable via `CFB_PICKS_DB` / `CFB_PICKS_MODEL` / `CFB_PICKS_CALIBRATION` env vars. Loads `.env` via `python-dotenv` if present.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 # tests/test_config.py
+import datetime
 import importlib
 from pathlib import Path
 
 
-def test_seasons_excludes_2020_and_spans_2021_to_2025():
+def test_seasons_starts_at_2021_excludes_2020_and_includes_current_year():
     from cfb_picks.config import SEASONS
 
-    assert SEASONS == [2021, 2022, 2023, 2024, 2025]
+    assert SEASONS[0] == 2021
+    assert 2020 not in SEASONS
+    assert SEASONS[-1] == datetime.date.today().year
+    assert SEASONS == sorted(SEASONS)
 
 
-def test_db_path_overridable_by_env_var(monkeypatch, tmp_path):
-    custom_path = str(tmp_path / "custom.db")
-    monkeypatch.setenv("CFB_PICKS_DB", custom_path)
+def test_paths_overridable_by_env_vars(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "custom.db")
+    model_path = str(tmp_path / "custom_model.json")
+    calibration_path = str(tmp_path / "custom_calibration.json")
+    monkeypatch.setenv("CFB_PICKS_DB", db_path)
+    monkeypatch.setenv("CFB_PICKS_MODEL", model_path)
+    monkeypatch.setenv("CFB_PICKS_CALIBRATION", calibration_path)
 
     import cfb_picks.config as config
 
     importlib.reload(config)
 
-    assert config.DB_PATH == Path(custom_path)
+    assert config.DB_PATH == Path(db_path)
+    assert config.MODEL_PATH == Path(model_path)
+    assert config.CALIBRATION_PATH == Path(calibration_path)
 
     monkeypatch.delenv("CFB_PICKS_DB", raising=False)
+    monkeypatch.delenv("CFB_PICKS_MODEL", raising=False)
+    monkeypatch.delenv("CFB_PICKS_CALIBRATION", raising=False)
     importlib.reload(config)
 ```
 
@@ -1815,6 +2011,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'cfb_picks.config'`
 
 ```python
 # cfb_picks/config.py
+import datetime
 import os
 from pathlib import Path
 
@@ -1826,12 +2023,16 @@ except ImportError:
     pass
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_CURRENT_YEAR = datetime.date.today().year
 
 DB_PATH = Path(os.environ.get("CFB_PICKS_DB", _PROJECT_ROOT / "data" / "cfb_picks.db"))
 MODEL_PATH = Path(
     os.environ.get("CFB_PICKS_MODEL", _PROJECT_ROOT / "data" / "model_weights.json")
 )
-SEASONS = [2021, 2022, 2023, 2024, 2025]
+CALIBRATION_PATH = Path(
+    os.environ.get("CFB_PICKS_CALIBRATION", _PROJECT_ROOT / "data" / "calibration.json")
+)
+SEASONS = [year for year in range(2021, _CURRENT_YEAR + 1) if year != 2020]
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1843,21 +2044,24 @@ Expected: PASS
 
 ```bash
 git add cfb_picks/config.py tests/test_config.py
-git commit -m "feat: add config module"
+git commit -m "feat: add config module with dynamic season range"
 ```
 
 ---
 
-## Task 14: CLI wiring
+## Task 15: CLI wiring
 
 **Files:**
 - Create: `cfb_picks/cli.py`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: everything from Tasks 2-13.
+- Consumes: everything from Tasks 2-14.
 - Produces: a Click group `cli` with commands `fetch-data`, `build-ratings`, `backtest`, `predict`, `record-results`, `history`, and a `main()` entry point (matches `pyproject.toml`'s `[project.scripts]`).
-- `predict --input <csv> --season <int> --week <int>`: reads a CSV with columns `home_team,away_team,spread`, normalizes team names via `normalize_team_name`, builds features, predicts margins, computes picks via `make_picks`, persists them to the `picks` table (`INSERT OR REPLACE`), and prints a table with the best pick flagged.
+- `fetch-data [--seasons ...]`: defaults to the full `SEASONS` range but accepts a comma-separated override for cheap incremental refreshes mid-season.
+- `build-ratings`: **always** recomputes Elo + regression + calibration over the full `SEASONS` range (no override) — a partial range would truncate `elo_ratings` and corrupt season-to-season carryover. Also runs the walk-forward backtest and saves the resulting edge-bucket calibration to `CALIBRATION_PATH`.
+- `backtest`: always runs over the full `SEASONS` range; no longer needs a saved model since `run_backtest` fits its own per-season out-of-sample models.
+- `predict --input <csv> --season <int> --week <int>`: reads a CSV with columns `home_team,away_team,spread` and an optional `neutral_site` column (`1`/`true` = neutral site), normalizes team names via `normalize_team_name`, builds features, predicts margins, computes picks via `make_picks` (loading calibration if available), persists them to the `picks` table (`INSERT OR REPLACE`), and prints a table with the best pick flagged.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1873,8 +2077,10 @@ from cfb_picks.model import ModelWeights, save_model
 def _setup_env(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     model_path = tmp_path / "model.json"
+    calibration_path = tmp_path / "calibration.json"
     monkeypatch.setattr(cli_module, "DB_PATH", db_path)
     monkeypatch.setattr(cli_module, "MODEL_PATH", model_path)
+    monkeypatch.setattr(cli_module, "CALIBRATION_PATH", calibration_path)
 
     conn = get_connection(db_path)
     init_db(conn)
@@ -1910,6 +2116,20 @@ def test_predict_persists_picks_and_prints_best_pick(tmp_path, monkeypatch):
     assert row["is_best_pick"] == 1
 
 
+def test_predict_reads_optional_neutral_site_column(tmp_path, monkeypatch):
+    _setup_env(tmp_path, monkeypatch)
+    slate = tmp_path / "slate.csv"
+    slate.write_text("home_team,away_team,spread,neutral_site\nA,B,-3,1\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+
+    assert result.exit_code == 0
+
+
 def test_history_reports_season_record(tmp_path, monkeypatch):
     db_path = _setup_env(tmp_path, monkeypatch)
     conn = get_connection(db_path)
@@ -1941,8 +2161,9 @@ import click
 
 from .aliases import normalize_team_name
 from .backtest import run_backtest, summarize_backtest
+from .calibration import load_calibration, save_calibration
 from .cfbd_client import CFBDClient
-from .config import DB_PATH, MODEL_PATH, SEASONS
+from .config import CALIBRATION_PATH, DB_PATH, MODEL_PATH, SEASONS
 from .db import get_connection, init_db
 from .elo import compute_elo_history
 from .features import build_features
@@ -1954,45 +2175,48 @@ from .predict import make_picks
 from .results import grade_week
 
 
-def _seasons_option(seasons):
-    return [int(s) for s in seasons.split(",")] if seasons else SEASONS
-
-
 @click.group()
 def cli():
     pass
 
 
 @cli.command("fetch-data")
-@click.option("--seasons", default=None, help="Comma-separated seasons; defaults to configured range.")
+@click.option(
+    "--seasons",
+    default=None,
+    help="Comma-separated seasons for a cheap incremental refresh; defaults to the full configured range.",
+)
 def fetch_data_cmd(seasons):
     conn = get_connection(DB_PATH)
     init_db(conn)
-    years = _seasons_option(seasons)
+    years = [int(s) for s in seasons.split(",")] if seasons else SEASONS
     fetch_data_impl(conn, CFBDClient(), years)
     click.echo(f"Fetched data for seasons: {years}")
 
 
 @cli.command("build-ratings")
-@click.option("--seasons", default=None)
-def build_ratings_cmd(seasons):
+def build_ratings_cmd():
     conn = get_connection(DB_PATH)
     init_db(conn)
-    years = _seasons_option(seasons)
-    compute_elo_history(conn, years)
-    feature_dicts, margins = gather_training_data(conn, years)
+
+    compute_elo_history(conn, SEASONS)
+
+    feature_dicts, margins = gather_training_data(conn, SEASONS)
     weights = train_model(feature_dicts, margins)
     save_model(weights, MODEL_PATH)
-    click.echo(f"Ratings + model trained on seasons {years}, saved to {MODEL_PATH}")
+
+    backtest_results = run_backtest(conn, SEASONS)
+    calibration = summarize_backtest(backtest_results)["by_edge_bucket"]
+    save_calibration(calibration, CALIBRATION_PATH)
+
+    click.echo(f"Ratings + model trained on seasons {SEASONS}, saved to {MODEL_PATH}")
+    click.echo(f"Calibration saved to {CALIBRATION_PATH}: {calibration}")
 
 
 @cli.command("backtest")
-@click.option("--seasons", default=None)
-def backtest_cmd(seasons):
+def backtest_cmd():
     conn = get_connection(DB_PATH)
-    years = _seasons_option(seasons)
-    weights = load_model(MODEL_PATH)
-    results = run_backtest(conn, weights, years)
+    results = run_backtest(conn, SEASONS)
     click.echo(summarize_backtest(results))
 
 
@@ -2003,6 +2227,10 @@ def backtest_cmd(seasons):
 def predict_cmd(input_path, season, week):
     conn = get_connection(DB_PATH)
     weights = load_model(MODEL_PATH)
+    try:
+        calibration = load_calibration(CALIBRATION_PATH)
+    except FileNotFoundError:
+        calibration = None
 
     games = []
     with open(input_path, newline="") as f:
@@ -2010,7 +2238,8 @@ def predict_cmd(input_path, season, week):
             home = normalize_team_name(conn, row["home_team"])
             away = normalize_team_name(conn, row["away_team"])
             spread = float(row["spread"])
-            features = build_features(conn, season, week, home, away)
+            neutral_site = row.get("neutral_site", "0").strip().lower() in ("1", "true")
+            features = build_features(conn, season, week, home, away, neutral_site)
             predicted_margin = predict_margin(weights, features)
             games.append(
                 {
@@ -2021,7 +2250,7 @@ def predict_cmd(input_path, season, week):
                 }
             )
 
-    picks = make_picks(games)
+    picks = make_picks(games, calibration=calibration)
     for pick in picks:
         conn.execute(
             "INSERT OR REPLACE INTO picks (season, week, home_team, away_team, spread, "
@@ -2094,7 +2323,7 @@ git commit -m "feat: wire up CLI commands"
 
 ---
 
-## Task 15: README with setup and weekly workflow
+## Task 16: README with setup and weekly workflow
 
 **Files:**
 - Create: `README.md`
@@ -2116,22 +2345,30 @@ Power-rating model for picking college football games against the spread.
 3. `python -m venv .venv && source .venv/Scripts/activate` (or `.venv/bin/activate` on macOS/Linux)
 4. `pip install -e ".[dev]"`
 5. `pytest` to confirm everything passes.
-6. `cfb-picks fetch-data` to pull 2021-2025 historical data (a few dozen API calls, well under the free 1,000/month limit).
-7. `cfb-picks build-ratings` to compute Elo history and fit the regression model.
-8. `cfb-picks backtest` to see historical ATS accuracy and edge-size calibration before picking live.
+6. `cfb-picks fetch-data` to pull historical data for every season from 2021 through the current one (a few dozen API calls total, well under the free 1,000/month limit).
+7. `cfb-picks build-ratings` to compute Elo history, fit the regression model, and produce the edge-size calibration table.
+8. `cfb-picks backtest` to see out-of-sample historical ATS accuracy before picking live.
 
 ## Weekly workflow
 
-1. Paste the Splash slate (text or screenshot) into chat; it gets converted into a CSV with columns `home_team,away_team,spread` (spread is home-team-relative: negative = home favored).
-2. `cfb-picks predict --input slate.csv --season <year> --week <n>` — prints ranked picks with the best pick flagged, and saves them.
-3. After games finish: `cfb-picks record-results --season <year> --week <n>`.
-4. `cfb-picks history --season <year>` to see your running point total and ATS record.
+1. `cfb-picks fetch-data --seasons <current_year>` to pull any newly completed games/lines/stats for the current season (cheap, incremental).
+2. `cfb-picks build-ratings` to recompute Elo through the latest results and refit the regression + calibration on the full history. **Run this every week** — it's what lets ratings reflect the season so far.
+3. Paste the Splash slate (text or screenshot) into chat; it gets converted into a CSV with columns `home_team,away_team,spread` (spread is home-team-relative: negative = home favored) and an optional `neutral_site` column for games at a neutral site.
+4. `cfb-picks predict --input slate.csv --season <year> --week <n>` — prints ranked picks with the best pick flagged (chosen by calibrated confidence, not just raw edge size), and saves them.
+5. After games finish: `cfb-picks record-results --season <year> --week <n>`.
+6. `cfb-picks history --season <year>` to see your running point total and ATS record.
+
+**Note:** the calibration table is built from CFBD's consensus closing lines, which can differ from Splash's contest line (often set earlier and off-market). Treat calibration hit-rates as directional guidance about which edge sizes tend to be trustworthy, not exact live win probabilities.
 
 ## Other commands
 
-- `cfb-picks fetch-data [--seasons 2021,2022,...]` — refresh CFBD data.
-- `cfb-picks build-ratings [--seasons ...]` — recompute Elo history and refit the regression weights.
-- `cfb-picks backtest [--seasons ...]` — run historical validation.
+- `cfb-picks fetch-data [--seasons 2021,2022,...]` — refresh CFBD data; defaults to the full range, or pass specific seasons for a cheap incremental update.
+- `cfb-picks build-ratings` — recompute Elo history, refit the regression weights, and rebuild the calibration table over the full season range. No `--seasons` override — a partial range would corrupt season-to-season Elo carryover.
+- `cfb-picks backtest` — run out-of-sample historical validation over the full season range.
+
+## Tuning
+
+`K_FACTOR`, `HOME_FIELD_ELO`, and `REGRESSION_FACTOR` (in `cfb_picks/elo.py`) and the ridge `alpha` (in `cfb_picks/model.py`'s `train_model`) are hand-tunable constants, not auto-tuned. After running `backtest`, if overall accuracy or edge-bucket calibration looks off, adjust these and re-run `build-ratings` + `backtest` to compare.
 ```
 
 - [ ] **Step 2: Commit**
@@ -2145,7 +2382,8 @@ git commit -m "docs: add setup and weekly workflow README"
 
 ## Self-Review Notes
 
-- **Spec coverage:** data layer (Tasks 2-5), Elo + feature blend + regression (Tasks 6-8), pick/edge/best-pick logic (Task 9), backtesting/calibration (Task 10), weekly workflow/CLI (Tasks 13-14), history tracking (Tasks 11-12, 14). All spec sections have a corresponding task.
+- **Spec coverage:** data layer (Tasks 2-5), Elo + feature blend + regression (Tasks 6-8), calibration + pick/edge/best-pick logic (Tasks 9-10), out-of-sample backtesting/calibration (Task 11), weekly workflow/CLI (Tasks 14-15), history tracking (Tasks 12-13, 15). All spec sections have a corresponding task.
 - **Known deviation from spec (surfaced to user before planning):** efficiency features are CFBD's actual advanced-stats fields (`successRate`, `ppa`) rather than yards/play and turnover margin, which CFBD's advanced-stats endpoint does not expose. Same intent, real data.
-- **Type consistency:** `ModelWeights`, `Pick`, and all function signatures are used identically across Tasks 8-14 (verified `FEATURE_ORDER`, `predict_margin`, `make_picks`, `compute_edge` signatures match between definition and every call site).
+- **Post-brainstorm advisor review caught and fixed:** (1) `SEASONS` is now computed dynamically so the tool works for the current/live season, not just a hardcoded 2021-2025 range; `build-ratings` always rebuilds the full contiguous range rather than accepting a partial-range override that would corrupt Elo carryover. (2) Backtesting is now walk-forward/out-of-sample (train only on strictly prior seasons) instead of fitting and evaluating on the same data. (3) Elo baselines are FCS-aware (non-FBS opponents start at a lower baseline, and FBS-vs-FCS games are excluded from the regression training target) so blowout wins over overmatched non-FBS opponents don't skew ratings. (4) The "best pick" is now actually selected using the backtested edge-size calibration table (via a new `calibration.py` module), not just raw edge magnitude. (5) The weekly slate CSV supports an optional `neutral_site` column.
+- **Type consistency:** `ModelWeights`, `Pick`, and all function signatures are used identically across Tasks 8-15 (verified `FEATURE_ORDER`, `predict_margin`, `make_picks`, `compute_edge`, `edge_bucket` signatures match between definition and every call site; no import cycles — `calibration.py` has no dependencies on `predict.py` or `backtest.py`, avoiding the cycle that would otherwise arise from `backtest.py` needing bucket logic and `predict.py` needing it too).
 - **No placeholders:** every step has runnable code and concrete assertions; no TBD/TODO markers.
