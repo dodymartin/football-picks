@@ -4,6 +4,7 @@ from .elo import is_fbs_team
 from .features import build_features
 from .model import gather_training_data, predict_margin, train_model
 from .predict import compute_edge
+from .results import grade_ats
 
 
 def _market_spread(conn, game_id):
@@ -40,9 +41,11 @@ def _evaluate_season(conn, weights, season):
         edge = compute_edge(predicted_margin, spread)
 
         actual_margin = game["home_points"] - game["away_points"]
-        home_covered = actual_margin > -spread
         picked_home = edge > 0
-        results.append({"edge": edge, "correct": picked_home == home_covered})
+        grade = grade_ats(actual_margin, spread, picked_home)
+        if grade == "push":
+            continue
+        results.append({"edge": edge, "correct": grade == "win"})
 
     return results
 

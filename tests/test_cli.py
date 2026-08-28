@@ -48,6 +48,69 @@ def test_predict_persists_picks_and_prints_best_pick(tmp_path, monkeypatch):
     assert row["is_best_pick"] == 1
 
 
+def test_predict_rerun_replaces_stale_rows_without_duplicating_best_pick(tmp_path, monkeypatch):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    slate = tmp_path / "slate.csv"
+    slate.write_text("home_team,away_team,spread\nA,B,-3\n")
+
+    runner = CliRunner()
+    runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+
+    # Re-run with a corrected slate for the same season/week.
+    slate.write_text("home_team,away_team,spread\nA,B,-7\n")
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0
+
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'A' AND away_team = 'B'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["spread"] == -7
+    total_best_picks = conn.execute(
+        "SELECT SUM(is_best_pick) c FROM picks WHERE season = 2024 AND week = 1"
+    ).fetchone()["c"]
+    assert total_best_picks <= 1
+
+
+def test_predict_rerun_does_not_erase_already_graded_result(tmp_path, monkeypatch):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    slate = tmp_path / "slate.csv"
+    slate.write_text("home_team,away_team,spread\nA,B,-3\n")
+
+    runner = CliRunner()
+    runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+
+    conn = get_connection(db_path)
+    conn.execute(
+        "UPDATE picks SET result = 'win' WHERE season = 2024 AND week = 1 "
+        "AND home_team = 'A' AND away_team = 'B'"
+    )
+    conn.commit()
+
+    # Re-running predict for the same graded slate must not wipe the result.
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0
+
+    row = conn.execute(
+        "SELECT result FROM picks WHERE season = 2024 AND week = 1 "
+        "AND home_team = 'A' AND away_team = 'B'"
+    ).fetchone()
+    assert row["result"] == "win"
+
+
 def test_predict_reads_optional_neutral_site_column(tmp_path, monkeypatch):
     _setup_env(tmp_path, monkeypatch)
     slate = tmp_path / "slate.csv"
@@ -76,6 +139,23 @@ def test_predict_handles_short_row_missing_neutral_site_value(tmp_path, monkeypa
     )
 
     assert result.exit_code == 0, result.output
+
+
+def test_build_ratings_raises_clean_error_when_no_training_data(tmp_path, monkeypatch):
+    db_path = tmp_path / "test.db"
+    monkeypatch.setattr(cli_module, "DB_PATH", db_path)
+    monkeypatch.setattr(cli_module, "MODEL_PATH", tmp_path / "model.json")
+    monkeypatch.setattr(cli_module, "CALIBRATION_PATH", tmp_path / "calibration.json")
+    monkeypatch.setattr(cli_module, "SEASONS", [2024])
+    conn = get_connection(db_path)
+    init_db(conn)
+    conn.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(cli_module.cli, ["build-ratings"])
+
+    assert result.exit_code != 0
+    assert "No training data available" in str(result.output) + str(result.exception)
 
 
 def test_build_ratings_rejects_seasons_option(tmp_path, monkeypatch):

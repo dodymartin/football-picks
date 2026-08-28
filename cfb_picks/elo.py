@@ -44,7 +44,9 @@ def is_fbs_team(conn, team):
     row = conn.execute(
         "SELECT classification FROM teams WHERE school = ?", (team,)
     ).fetchone()
-    return bool(row and row["classification"] == "fbs")
+    if not row or row["classification"] is None:
+        return False
+    return str(row["classification"]).lower() == "fbs"
 
 
 def _baseline_rating(conn, team):

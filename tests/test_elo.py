@@ -9,10 +9,12 @@ from cfb_picks.elo import (
     compute_elo_history,
     expected_win_prob,
     get_rating_as_of,
+    is_fbs_team,
     mov_multiplier,
     regress_to_mean,
     update_ratings,
 )
+from cfb_picks.ingest import upsert_teams
 
 GAME_COLUMNS = (
     "id, season, week, season_type, start_date, completed, neutral_site, "
@@ -78,6 +80,26 @@ def test_compute_elo_history_starts_non_fbs_opponents_at_lower_baseline(tmp_path
         "SELECT rating FROM elo_ratings WHERE season = 2024 AND week = 0 AND team = 'Some FCS School'"
     ).fetchone()
     assert preseason_row["rating"] == FCS_BASELINE_RATING
+
+
+def test_is_fbs_team_treats_mixed_case_classification_as_fbs(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    conn.execute("INSERT INTO teams (school, classification) VALUES ('Ohio State', 'FBS')")
+    conn.commit()
+    assert is_fbs_team(conn, "Ohio State") is True
+
+
+def test_is_fbs_team_treats_team_ingested_from_fbs_endpoint_with_missing_classification_as_fbs(
+    tmp_path,
+):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    # Simulates ingesting a /teams/fbs response where CFBD omitted the
+    # (nullable) classification field; upsert_teams should default it to
+    # "fbs" and is_fbs_team should recognize it.
+    upsert_teams(conn, [{"school": "Ohio State", "conference": "Big Ten"}])
+    assert is_fbs_team(conn, "Ohio State") is True
 
 
 def test_get_rating_as_of_returns_fbs_baseline_for_known_fbs_team(tmp_path):

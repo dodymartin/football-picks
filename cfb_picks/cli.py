@@ -46,6 +46,8 @@ def build_ratings_cmd():
     compute_elo_history(conn, SEASONS)
 
     feature_dicts, margins = gather_training_data(conn, SEASONS)
+    if not feature_dicts:
+        raise click.ClickException("No training data available — has fetch-data been run?")
     weights = train_model(feature_dicts, margins)
     save_model(weights, MODEL_PATH)
 
@@ -95,9 +97,15 @@ def predict_cmd(input_path, season, week):
             )
 
     picks = make_picks(games, calibration=calibration)
+    # Clear any stale/corrected ungraded predictions for this exact slate before
+    # inserting the new one, so a re-run can't leave duplicate or stale
+    # is_best_pick rows behind. Rows that already have a result are left alone.
+    conn.execute(
+        "DELETE FROM picks WHERE season = ? AND week = ? AND result IS NULL", (season, week)
+    )
     for pick in picks:
         conn.execute(
-            "INSERT OR REPLACE INTO picks (season, week, home_team, away_team, spread, "
+            "INSERT OR IGNORE INTO picks (season, week, home_team, away_team, spread, "
             "predicted_margin, edge, pick_team, is_best_pick, result) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
             (
@@ -129,8 +137,13 @@ def record_results_cmd(season, week):
     conn = get_connection(DB_PATH)
     client = CFBDClient()
     upsert_games(conn, client.get_games(season))
-    grade_week(conn, season, week)
-    click.echo(f"Graded week {week}, {season}")
+    count = grade_week(conn, season, week)
+    if count == 0:
+        click.echo(
+            "No picks were graded — check that games have completed and week/season match"
+        )
+    else:
+        click.echo(f"Graded {count} picks for week {week}, {season}")
 
 
 @cli.command("history")

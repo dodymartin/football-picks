@@ -2,8 +2,11 @@ from .aliases import seed_aliases
 
 
 def upsert_teams(conn, teams_json):
+    # Every team returned by /teams/fbs is FBS by construction, even though
+    # the payload's `classification` field is nullable, so default it to
+    # "fbs" when missing.
     rows = [
-        (team["school"], team.get("conference"), team.get("classification"))
+        (team["school"], team.get("conference"), team.get("classification") or "fbs")
         for team in teams_json
     ]
     conn.executemany(

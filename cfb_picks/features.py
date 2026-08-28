@@ -10,6 +10,7 @@ def _trailing_offense_stats(conn, season, week, team, n=TRAILING_GAMES):
         FROM team_game_stats s
         JOIN games g ON g.id = s.game_id
         WHERE s.team = ? AND (g.season < ? OR (g.season = ? AND g.week < ?))
+        AND s.success_rate IS NOT NULL AND s.ppa IS NOT NULL
         ORDER BY g.season DESC, g.week DESC
         LIMIT ?
         """,

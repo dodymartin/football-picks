@@ -38,6 +38,22 @@ def test_upsert_teams(tmp_path):
     assert row["conference"] == "Big Ten"
 
 
+def test_upsert_teams_defaults_missing_classification_to_fbs(tmp_path):
+    conn = _conn(tmp_path)
+    # Every team from /teams/fbs is FBS by construction, even though CFBD's
+    # `classification` field is nullable in the payload.
+    upsert_teams(conn, [{"school": "Ohio State", "conference": "Big Ten"}])
+    row = conn.execute("SELECT * FROM teams WHERE school = 'Ohio State'").fetchone()
+    assert row["classification"] == "fbs"
+
+
+def test_upsert_teams_defaults_explicit_none_classification_to_fbs(tmp_path):
+    conn = _conn(tmp_path)
+    upsert_teams(conn, [{"school": "Ohio State", "conference": "Big Ten", "classification": None}])
+    row = conn.execute("SELECT * FROM teams WHERE school = 'Ohio State'").fetchone()
+    assert row["classification"] == "fbs"
+
+
 def test_upsert_games_is_idempotent(tmp_path):
     conn = _conn(tmp_path)
     upsert_games(conn, [SAMPLE_GAME])
