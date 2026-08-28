@@ -1,0 +1,24 @@
+[project]
+name = "cfb-picks"
+version = "0.1.0"
+description = "Power-rating model for picking college football games against the spread"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "click>=8.1",
+    "scikit-learn>=1.3",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+cfb-picks = "cfb_picks.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cfb_picks*"]
