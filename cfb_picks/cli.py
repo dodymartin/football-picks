@@ -97,13 +97,50 @@ def predict_cmd(input_path, season, week):
             )
 
     picks = make_picks(games, calibration=calibration)
-    # Clear any stale/corrected ungraded predictions for this exact slate before
-    # inserting the new one, so a re-run can't leave duplicate or stale
-    # is_best_pick rows behind. Rows that already have a result are left alone.
-    conn.execute(
-        "DELETE FROM picks WHERE season = ? AND week = ? AND result IS NULL", (season, week)
-    )
+
+    # Scope the DELETE to only the games actually present in this CSV, and only
+    # to ungraded rows. This lets a partial re-predict (e.g. one corrected game)
+    # replace just that game without wiping other ungraded predictions for the
+    # same week that this run doesn't touch. Graded rows are never deleted.
     for pick in picks:
+        conn.execute(
+            "DELETE FROM picks WHERE season = ? AND week = ? AND home_team = ? "
+            "AND away_team = ? AND result IS NULL",
+            (season, week, pick.home_team, pick.away_team),
+        )
+
+    # The "best pick" is locked in once any pick for the week has been graded —
+    # the real contest rule is that best pick is decided before the week's
+    # games are played. If a graded best pick already exists for this week,
+    # this run must not introduce a second one.
+    locked_best_pick = conn.execute(
+        "SELECT 1 FROM picks WHERE season = ? AND week = ? "
+        "AND is_best_pick = 1 AND result IS NOT NULL",
+        (season, week),
+    ).fetchone()
+
+    # Clear any stale is_best_pick flag on other ungraded rows for this week
+    # that aren't part of this run (games from a previous partial predict that
+    # this run isn't about to replace). This can never touch the locked/graded
+    # row above, since it's scoped to result IS NULL.
+    conn.execute(
+        "UPDATE picks SET is_best_pick = 0 WHERE season = ? AND week = ? AND result IS NULL",
+        (season, week),
+    )
+
+    if locked_best_pick:
+        for pick in picks:
+            pick.is_best_pick = False
+        click.echo(
+            "Note: this week's best pick is already locked in from a graded "
+            "result; not assigning a new best pick."
+        )
+
+    for pick in picks:
+        # The DELETE above is scoped per-game, so any remaining PK conflict
+        # here is by definition a graded row for that exact game (deliberately
+        # not deleted) — INSERT OR IGNORE leaves it untouched rather than
+        # clobbering it back to result = NULL.
         conn.execute(
             "INSERT OR IGNORE INTO picks (season, week, home_team, away_team, spread, "
             "predicted_margin, edge, pick_team, is_best_pick, result) "
