@@ -82,7 +82,7 @@ def predict_cmd(input_path, season, week):
             home = normalize_team_name(conn, row["home_team"])
             away = normalize_team_name(conn, row["away_team"])
             spread = float(row["spread"])
-            neutral_site = row.get("neutral_site", "0").strip().lower() in ("1", "true")
+            neutral_site = (row.get("neutral_site") or "0").strip().lower() in ("1", "true")
             features = build_features(conn, season, week, home, away, neutral_site)
             predicted_margin = predict_margin(weights, features)
             games.append(

@@ -62,6 +62,38 @@ def test_predict_reads_optional_neutral_site_column(tmp_path, monkeypatch):
     assert result.exit_code == 0
 
 
+def test_predict_handles_short_row_missing_neutral_site_value(tmp_path, monkeypatch):
+    _setup_env(tmp_path, monkeypatch)
+    slate = tmp_path / "slate.csv"
+    # Header declares neutral_site, but the data row is short by that trailing
+    # field, so csv.DictReader fills it with None (not absent, not "0").
+    slate.write_text("home_team,away_team,spread,neutral_site\nA,B,-3\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
+def test_build_ratings_rejects_seasons_option(tmp_path, monkeypatch):
+    runner = CliRunner()
+    result = runner.invoke(cli_module.cli, ["build-ratings", "--seasons", "2024"])
+
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
+
+
+def test_backtest_rejects_seasons_option(tmp_path, monkeypatch):
+    runner = CliRunner()
+    result = runner.invoke(cli_module.cli, ["backtest", "--seasons", "2024"])
+
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
+
+
 def test_history_reports_season_record(tmp_path, monkeypatch):
     db_path = _setup_env(tmp_path, monkeypatch)
     conn = get_connection(db_path)
