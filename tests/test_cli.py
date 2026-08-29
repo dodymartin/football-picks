@@ -48,6 +48,29 @@ def test_predict_persists_picks_and_prints_best_pick(tmp_path, monkeypatch):
     assert row["is_best_pick"] == 1
 
 
+def test_predict_reads_utf8_team_names(tmp_path, monkeypatch):
+    # Windows' default text-mode encoding is cp1252, not utf-8; a slate CSV
+    # saved as utf-8 with an accented team name must still be read correctly.
+    db_path = _setup_env(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO team_aliases (alias, canonical_school) VALUES (?, ?)",
+        ("San José State", "San José State"),
+    )
+    conn.commit()
+
+    slate = tmp_path / "slate.csv"
+    slate.write_bytes("home_team,away_team,spread\nA,San José State,-3\n".encode("utf-8"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
 def test_predict_rerun_replaces_stale_rows_without_duplicating_best_pick(tmp_path, monkeypatch):
     db_path = _setup_env(tmp_path, monkeypatch)
     slate = tmp_path / "slate.csv"

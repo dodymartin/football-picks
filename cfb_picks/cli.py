@@ -79,7 +79,7 @@ def predict_cmd(input_path, season, week):
         calibration = None
 
     games = []
-    with open(input_path, newline="") as f:
+    with open(input_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             home = normalize_team_name(conn, row["home_team"])
             away = normalize_team_name(conn, row["away_team"])
