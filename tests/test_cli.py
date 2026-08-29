@@ -232,6 +232,143 @@ def test_predict_shifts_best_pick_before_any_grading(tmp_path, monkeypatch):
     assert cd_row["is_best_pick"] == 1
 
 
+def test_predict_partial_rerun_does_not_steal_best_pick_from_held_back_game(
+    tmp_path, monkeypatch
+):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('C', 'C')")
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('D', 'D')")
+    conn.commit()
+
+    slate = tmp_path / "slate.csv"
+    # A/B has a much bigger edge than C/D, so A/B is the week's best pick.
+    slate.write_text("home_team,away_team,spread\nA,B,-30\nC,D,-3\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0, result.output
+
+    ab_row = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'A' AND away_team = 'B'"
+    ).fetchone()
+    assert ab_row["is_best_pick"] == 1
+
+    # Correction re-predict touching only the untouched, lower-edge C/D game.
+    correction = tmp_path / "correction.csv"
+    correction.write_text("home_team,away_team,spread\nC,D,-4\n")
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(correction), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0, result.output
+
+    ab_row = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'A' AND away_team = 'B'"
+    ).fetchone()
+    cd_row = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'C' AND away_team = 'D'"
+    ).fetchone()
+    assert ab_row["is_best_pick"] == 1
+    assert cd_row["is_best_pick"] == 0
+
+
+def test_predict_locks_best_pick_once_any_game_in_week_is_graded(tmp_path, monkeypatch):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('C', 'C')")
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('D', 'D')")
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('E', 'E')")
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('F', 'F')")
+    conn.commit()
+
+    slate = tmp_path / "slate.csv"
+    # A/B is the week's best pick; C/D is not.
+    slate.write_text("home_team,away_team,spread\nA,B,-30\nC,D,-3\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0, result.output
+
+    # C/D (not the flagged best pick) finishes and gets graded.
+    conn.execute(
+        "UPDATE picks SET result = 'win' WHERE season = 2024 AND week = 1 "
+        "AND home_team = 'C' AND away_team = 'D'"
+    )
+    conn.commit()
+
+    # A later run adds a new game with an enormous edge that would otherwise
+    # become the new best pick.
+    addition = tmp_path / "addition.csv"
+    addition.write_text("home_team,away_team,spread\nE,F,-100\n")
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(addition), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "already locked in" in result.output
+
+    ab_row = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'A' AND away_team = 'B'"
+    ).fetchone()
+    ef_row = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'E' AND away_team = 'F'"
+    ).fetchone()
+    assert ab_row["is_best_pick"] == 1
+    assert ef_row["is_best_pick"] == 0
+
+
+def test_predict_correction_to_locked_best_pick_keeps_its_flag(tmp_path, monkeypatch):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('C', 'C')")
+    conn.execute("INSERT INTO team_aliases (alias, canonical_school) VALUES ('D', 'D')")
+    conn.commit()
+
+    slate = tmp_path / "slate.csv"
+    # A/B is the week's best pick; C/D is not.
+    slate.write_text("home_team,away_team,spread\nA,B,-30\nC,D,-3\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0, result.output
+
+    # C/D (not the best pick) finishes first — the week is now locked.
+    conn.execute(
+        "UPDATE picks SET result = 'win' WHERE season = 2024 AND week = 1 "
+        "AND home_team = 'C' AND away_team = 'D'"
+    )
+    conn.commit()
+
+    # Correct the spread on A/B, which is itself the locked-in best pick.
+    correction = tmp_path / "correction.csv"
+    correction.write_text("home_team,away_team,spread\nA,B,-28\n")
+    result = runner.invoke(
+        cli_module.cli,
+        ["predict", "--input", str(correction), "--season", "2024", "--week", "1"],
+    )
+    assert result.exit_code == 0, result.output
+
+    ab_row = conn.execute(
+        "SELECT * FROM picks WHERE season = 2024 AND week = 1 AND home_team = 'A' AND away_team = 'B'"
+    ).fetchone()
+    assert ab_row["spread"] == -28
+    assert ab_row["is_best_pick"] == 1
+    total_best_picks = conn.execute(
+        "SELECT SUM(is_best_pick) c FROM picks WHERE season = 2024 AND week = 1"
+    ).fetchone()["c"]
+    assert total_best_picks == 1
+
+
 def test_predict_reads_optional_neutral_site_column(tmp_path, monkeypatch):
     _setup_env(tmp_path, monkeypatch)
     slate = tmp_path / "slate.csv"

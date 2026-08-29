@@ -41,3 +41,21 @@ def test_make_picks_best_pick_uses_calibration_when_provided():
     # (6*0.9=5.4 vs 9*0.3=2.7) favors the first.
     assert picks[0].is_best_pick is True
     assert picks[1].is_best_pick is False
+
+
+def test_make_picks_uses_neutral_default_for_edge_bucket_missing_from_calibration():
+    games = [
+        {"home_team": "A", "away_team": "B", "spread": -1, "predicted_margin": 7},  # edge 6 -> "5-8"
+        {"home_team": "C", "away_team": "D", "spread": -1, "predicted_margin": 10},  # edge 9 -> "8+"
+    ]
+    # "8+" never showed up in the backtest, so it's absent from calibration —
+    # not corrupted data, just a normal, sparsely-populated calibration file.
+    calibration = {"5-8": 0.9}
+
+    picks = make_picks(games, calibration=calibration)
+
+    # Without a neutral fallback, the uncalibrated game's raw edge (9) would
+    # beat the calibrated confidence (6*0.9=5.4) and win by default. With a
+    # neutral 0.5 default, its confidence is 9*0.5=4.5, so it should not win.
+    assert picks[0].is_best_pick is True
+    assert picks[1].is_best_pick is False

@@ -14,16 +14,19 @@ class Pick:
     is_best_pick: bool
 
 
+DEFAULT_WIN_RATE = 0.5
+
+
 def compute_edge(predicted_margin, spread):
     market_home_margin = -spread
     return predicted_margin - market_home_margin
 
 
-def _confidence_score(pick, calibration):
+def confidence_score(pick, calibration):
     if not calibration:
         return abs(pick.edge)
-    win_rate = calibration.get(edge_bucket(abs(pick.edge)))
-    return abs(pick.edge) * win_rate if win_rate is not None else abs(pick.edge)
+    win_rate = calibration.get(edge_bucket(abs(pick.edge)), DEFAULT_WIN_RATE)
+    return abs(pick.edge) * win_rate
 
 
 def make_picks(games, calibration=None):
@@ -43,6 +46,6 @@ def make_picks(games, calibration=None):
             )
         )
     if picks:
-        best = max(picks, key=lambda pick: _confidence_score(pick, calibration))
+        best = max(picks, key=lambda pick: confidence_score(pick, calibration))
         best.is_best_pick = True
     return picks
