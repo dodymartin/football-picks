@@ -62,6 +62,7 @@ def compute_elo_history(conn, seasons):
 
         games = conn.execute(
             "SELECT * FROM games WHERE season = ? AND completed = 1 "
+            "AND home_points IS NOT NULL AND away_points IS NOT NULL "
             "ORDER BY week ASC, id ASC",
             (season,),
         ).fetchall()

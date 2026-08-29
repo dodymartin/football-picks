@@ -66,6 +66,24 @@ def test_compute_elo_history_updates_ratings(tmp_path):
     assert get_rating_as_of(conn, 2024, 2, "Akron") < BASELINE_RATING
 
 
+def test_compute_elo_history_skips_completed_games_with_missing_scores(tmp_path):
+    # CFBD occasionally marks obscure games completed=1 with a null score
+    # (missing stats rather than an in-progress game); these must not crash
+    # the Elo pass or be treated as a 0-0 result.
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO teams (school, classification) VALUES ('Ohio State', 'fbs'), ('Akron', 'fbs')"
+    )
+    _insert_game(conn, (1, 2024, 1, "regular", None, 1, 0, "Ohio State", "Akron", None, 6))
+    conn.commit()
+
+    compute_elo_history(conn, [2024])
+
+    assert get_rating_as_of(conn, 2024, 2, "Ohio State") == BASELINE_RATING
+    assert get_rating_as_of(conn, 2024, 2, "Akron") == BASELINE_RATING
+
+
 def test_compute_elo_history_starts_non_fbs_opponents_at_lower_baseline(tmp_path):
     conn = get_connection(tmp_path / "test.db")
     init_db(conn)
