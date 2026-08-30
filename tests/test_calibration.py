@@ -8,8 +8,12 @@ def test_edge_bucket_boundaries():
     assert edge_bucket(4.9) == "2-5"
     assert edge_bucket(5) == "5-8"
     assert edge_bucket(7.9) == "5-8"
-    assert edge_bucket(8) == "8+"
-    assert edge_bucket(100) == "8+"
+    assert edge_bucket(8) == "8-15"
+    assert edge_bucket(14.9) == "8-15"
+    assert edge_bucket(15) == "15-25"
+    assert edge_bucket(24.9) == "15-25"
+    assert edge_bucket(25) == "25+"
+    assert edge_bucket(100) == "25+"
 
 
 def test_save_and_load_calibration_roundtrip(tmp_path):

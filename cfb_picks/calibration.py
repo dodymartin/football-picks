@@ -1,6 +1,13 @@
 import json
 
-EDGE_BUCKETS = [(2, "0-2"), (5, "2-5"), (8, "5-8"), (float("inf"), "8+")]
+EDGE_BUCKETS = [
+    (2, "0-2"),
+    (5, "2-5"),
+    (8, "5-8"),
+    (15, "8-15"),
+    (25, "15-25"),
+    (float("inf"), "25+"),
+]
 
 
 def edge_bucket(abs_edge):

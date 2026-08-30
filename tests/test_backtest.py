@@ -74,7 +74,7 @@ def test_summarize_backtest_buckets_by_edge_size():
 
     assert summary["overall_accuracy"] == pytest.approx(2 / 3)
     assert summary["by_edge_bucket"]["0-2"] == pytest.approx(1.0)
-    assert summary["by_edge_bucket"]["8+"] == pytest.approx(0.5)
+    assert summary["by_edge_bucket"]["8-15"] == pytest.approx(0.5)
     assert summary["n"] == 3
 
 
