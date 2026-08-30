@@ -29,6 +29,10 @@ def confidence_score(pick, calibration):
     return abs(pick.edge) * win_rate
 
 
+def rank_by_confidence(picks, calibration=None):
+    return sorted(picks, key=lambda pick: confidence_score(pick, calibration), reverse=True)
+
+
 def make_picks(games, calibration=None):
     picks = []
     for game in games:

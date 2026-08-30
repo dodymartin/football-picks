@@ -15,7 +15,7 @@ from .history import season_record
 from .ingest import fetch_data as fetch_data_impl
 from .ingest import upsert_games
 from .model import gather_training_data, load_model, predict_margin, save_model, train_model
-from .predict import Pick, confidence_score, make_picks
+from .predict import Pick, confidence_score, make_picks, rank_by_confidence
 from .results import grade_week
 
 
@@ -223,6 +223,86 @@ def predict_cmd(input_path, season, week):
             f"{pick.away_team} @ {pick.home_team} ({pick.spread:+}): "
             f"pick {pick.pick_team} (edge {pick.edge:+.1f}){marker}"
         )
+
+
+@cli.command("top-picks")
+@click.option("--input", "input_path", required=True, type=click.Path(exists=True))
+@click.option("--season", required=True, type=int)
+@click.option("--week", required=True, type=int)
+@click.option("--count", default=10, type=int)
+@click.option("--output", "output_path", default=None, type=click.Path())
+def top_picks_cmd(input_path, season, week, count, output_path):
+    conn = get_connection(DB_PATH)
+    weights = load_model(MODEL_PATH)
+    try:
+        calibration = load_calibration(CALIBRATION_PATH)
+    except FileNotFoundError:
+        calibration = None
+
+    games = []
+    with open(input_path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            home = normalize_team_name(conn, row["home_team"])
+            away = normalize_team_name(conn, row["away_team"])
+            spread = float(row["spread"])
+            neutral_site = (row.get("neutral_site") or "0").strip().lower() in ("1", "true")
+            features = build_features(conn, season, week, home, away, neutral_site)
+            predicted_margin = predict_margin(weights, features)
+            games.append(
+                {
+                    "home_team": home,
+                    "away_team": away,
+                    "spread": spread,
+                    "predicted_margin": predicted_margin,
+                }
+            )
+
+    # This is a read-only report for betting outside the contest: it never
+    # writes to the picks table, so it can freely overlap with the contest
+    # slate without touching its grading/lock state.
+    picks = make_picks(games, calibration=calibration)
+    ranked = rank_by_confidence(picks, calibration)
+    top = set(id(pick) for pick in ranked[:count])
+
+    if output_path is None:
+        output_path = f"top_picks_{season}_week{week}.csv"
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "rank",
+                "home_team",
+                "away_team",
+                "spread",
+                "pick_team",
+                "predicted_margin",
+                "edge",
+                "confidence",
+                "top_pick",
+            ]
+        )
+        for rank, pick in enumerate(ranked, start=1):
+            writer.writerow(
+                [
+                    rank,
+                    pick.home_team,
+                    pick.away_team,
+                    pick.spread,
+                    pick.pick_team,
+                    pick.predicted_margin,
+                    pick.edge,
+                    confidence_score(pick, calibration),
+                    int(id(pick) in top),
+                ]
+            )
+
+    for pick in ranked[:count]:
+        click.echo(
+            f"{pick.away_team} @ {pick.home_team} ({pick.spread:+}): "
+            f"pick {pick.pick_team} (edge {pick.edge:+.1f}, "
+            f"confidence {confidence_score(pick, calibration):.1f})"
+        )
+    click.echo(f"Full ranked list ({len(ranked)} games) written to {output_path}")
 
 
 @cli.command("record-results")

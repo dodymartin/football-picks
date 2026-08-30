@@ -1,4 +1,6 @@
 # tests/test_cli.py
+import csv
+
 from click.testing import CliRunner
 
 import cfb_picks.cli as cli_module
@@ -69,6 +71,74 @@ def test_predict_reads_utf8_team_names(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
+
+
+def test_top_picks_ranks_by_confidence_writes_full_csv_and_does_not_touch_picks_table(
+    tmp_path, monkeypatch
+):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    conn = get_connection(db_path)
+    for team in ("C", "D", "E", "F"):
+        conn.execute(
+            "INSERT INTO team_aliases (alias, canonical_school) VALUES (?, ?)", (team, team)
+        )
+    conn.commit()
+
+    # predicted_margin is always 5 (intercept=5, all coefficients 0), so
+    # edge = 5 - (-spread) = 5 + spread, and with no calibration file,
+    # confidence = abs(edge):
+    #   A vs B: spread -1 -> edge 4
+    #   C vs D: spread -8 -> edge -3
+    #   E vs F: spread  2 -> edge 7  (highest confidence)
+    slate = tmp_path / "slate.csv"
+    slate.write_text("home_team,away_team,spread\nA,B,-1\nC,D,-8\nE,F,2\n")
+    output = tmp_path / "out.csv"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        [
+            "top-picks",
+            "--input",
+            str(slate),
+            "--season",
+            "2024",
+            "--week",
+            "1",
+            "--count",
+            "2",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output.exists()
+
+    with open(output, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    assert [r["home_team"] for r in rows] == ["E", "A", "C"]
+    assert [r["top_pick"] for r in rows] == ["1", "1", "0"]
+
+    conn = get_connection(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM picks").fetchone()[0] == 0
+
+
+def test_top_picks_writes_default_output_path_when_not_given(tmp_path, monkeypatch):
+    db_path = _setup_env(tmp_path, monkeypatch)
+    slate = tmp_path / "slate.csv"
+    slate.write_text("home_team,away_team,spread\nA,B,-1\n")
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.cli,
+        ["top-picks", "--input", str(slate), "--season", "2024", "--week", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "top_picks_2024_week1.csv").exists()
 
 
 def test_predict_rerun_replaces_stale_rows_without_duplicating_best_pick(tmp_path, monkeypatch):

@@ -29,6 +29,7 @@ Power-rating model for picking college football games against the spread.
 - `cfb-picks fetch-data [--seasons 2021,2022,...]` — refresh CFBD data; defaults to the full range, or pass specific seasons for a cheap incremental update.
 - `cfb-picks build-ratings` — recompute Elo history, refit the regression weights, and rebuild the calibration table over the full season range. No `--seasons` override — a partial range would corrupt season-to-season Elo carryover.
 - `cfb-picks backtest` — run out-of-sample historical validation over the full season range.
+- `cfb-picks top-picks --input <csv> --season <year> --week <n> [--count 10] [--output <path>]` — for betting outside the Splash contest: paste in lines for as many games as you want scanned (same CSV format as `predict`), and it ranks them all by calibrated confidence, prints the top N (default 10), and writes the full ranked list to CSV (default `top_picks_<season>_week<week>.csv`) for cross-reference. Read-only — never touches the `picks` table, so it can freely overlap with the contest slate. Track win/loss yourself in your betting app; this doesn't grade results.
 
 ## Tuning
 
