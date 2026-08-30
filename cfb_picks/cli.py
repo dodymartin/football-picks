@@ -262,7 +262,6 @@ def top_picks_cmd(input_path, season, week, count, output_path):
     # slate without touching its grading/lock state.
     picks = make_picks(games, calibration=calibration)
     ranked = rank_by_confidence(picks, calibration)
-    top = set(id(pick) for pick in ranked[:count])
 
     if output_path is None:
         output_path = f"top_picks_{season}_week{week}.csv"
@@ -289,10 +288,10 @@ def top_picks_cmd(input_path, season, week, count, output_path):
                     pick.away_team,
                     pick.spread,
                     pick.pick_team,
-                    pick.predicted_margin,
-                    pick.edge,
-                    confidence_score(pick, calibration),
-                    int(id(pick) in top),
+                    round(pick.predicted_margin, 1),
+                    round(pick.edge, 1),
+                    round(confidence_score(pick, calibration), 1),
+                    int(rank <= count),
                 ]
             )
 
