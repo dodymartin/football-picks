@@ -66,3 +66,17 @@ def test_get_lines_and_advanced_stats_use_season_type_param():
         headers={"Authorization": "Bearer test-key"},
         timeout=30,
     )
+
+
+def test_get_talent_calls_correct_endpoint():
+    client, session = _client_with_fake_session([{"year": 2024, "team": "Georgia", "talent": 1003.67}])
+
+    result = client.get_talent(2024)
+
+    session.get.assert_called_once_with(
+        "https://api.collegefootballdata.com/talent",
+        params={"year": 2024},
+        headers={"Authorization": "Bearer test-key"},
+        timeout=30,
+    )
+    assert result == [{"year": 2024, "team": "Georgia", "talent": 1003.67}]

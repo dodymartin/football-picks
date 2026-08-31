@@ -33,4 +33,4 @@ Power-rating model for picking college football games against the spread.
 
 ## Tuning
 
-`K_FACTOR`, `HOME_FIELD_ELO`, and `REGRESSION_FACTOR` (in `cfb_picks/elo.py`) and the ridge `alpha` (in `cfb_picks/model.py`'s `train_model`) are hand-tunable constants, not auto-tuned. After running `backtest`, if overall accuracy or edge-bucket calibration looks off, adjust these and re-run `build-ratings` + `backtest` to compare.
+`K_FACTOR`, `HOME_FIELD_ELO`, and `REGRESSION_FACTOR` (in `cfb_picks/elo.py`), `RECENCY_DECAY` (in `cfb_picks/features.py`), and the ridge `alpha` (in `cfb_picks/model.py`'s `train_model`) are hand-tunable constants, not auto-tuned. After running `backtest`, if overall accuracy or edge-bucket calibration looks off, adjust these and re-run `build-ratings` + `backtest` to compare.

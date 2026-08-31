@@ -7,6 +7,7 @@ from cfb_picks.ingest import (
     upsert_betting_lines,
     upsert_games,
     upsert_team_game_stats,
+    upsert_team_talent,
     upsert_teams,
 )
 
@@ -105,6 +106,15 @@ def test_upsert_team_game_stats(tmp_path):
     assert row["ppa"] == 0.42
 
 
+def test_upsert_team_talent(tmp_path):
+    conn = _conn(tmp_path)
+    upsert_team_talent(conn, [{"year": 2024, "team": "Georgia", "talent": 1003.67}])
+    row = conn.execute(
+        "SELECT talent FROM team_talent WHERE season = 2024 AND team = 'Georgia'"
+    ).fetchone()
+    assert row["talent"] == 1003.67
+
+
 def test_fetch_data_calls_client_and_persists_everything(tmp_path):
     conn = _conn(tmp_path)
 
@@ -127,9 +137,13 @@ def test_fetch_data_calls_client_and_persists_everything(tmp_path):
                 }
             ]
 
+        def get_talent(self, year):
+            return [{"year": 2024, "team": "Ohio State", "talent": 987.65}]
+
     fetch_data(conn, FakeClient(), [2024])
 
     assert conn.execute("SELECT COUNT(*) c FROM games").fetchone()["c"] == 1
     assert conn.execute("SELECT COUNT(*) c FROM betting_lines").fetchone()["c"] == 1
     assert conn.execute("SELECT COUNT(*) c FROM team_game_stats").fetchone()["c"] == 1
+    assert conn.execute("SELECT COUNT(*) c FROM team_talent").fetchone()["c"] == 1
     assert conn.execute("SELECT COUNT(*) c FROM team_aliases").fetchone()["c"] >= 2

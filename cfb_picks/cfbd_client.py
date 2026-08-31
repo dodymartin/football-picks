@@ -39,3 +39,6 @@ class CFBDClient:
         return self._get(
             "/stats/game/advanced", {"year": year, "seasonType": season_type}
         )
+
+    def get_talent(self, year):
+        return self._get("/talent", {"year": year})

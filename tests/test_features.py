@@ -67,3 +67,47 @@ def test_build_features_passes_through_neutral_site(tmp_path):
     init_db(conn)
     features = build_features(conn, 2024, 1, "A", "B", neutral_site=True)
     assert features["neutral_site"] == 1.0
+
+
+def test_build_features_computes_talent_diff(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO team_talent (season, team, talent) VALUES (2024, 'A', 900), (2024, 'B', 700)"
+    )
+    conn.commit()
+
+    features = build_features(conn, 2024, 1, "A", "B")
+
+    assert features["talent_diff"] == pytest.approx(200)
+
+
+def test_build_features_defaults_talent_diff_to_zero_when_missing(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    features = build_features(conn, 2024, 1, "A", "B")
+    assert features["talent_diff"] == pytest.approx(0.0)
+
+
+def test_trailing_offense_stats_weights_recent_games_more_heavily(tmp_path):
+    conn = get_connection(tmp_path / "test.db")
+    init_db(conn)
+    # Two prior games for 'A': an old blowout (high success_rate) and a
+    # recent poor showing (low success_rate). A flat average would land at
+    # the midpoint (0.7); recency weighting should pull it below that,
+    # toward the more recent, worse game.
+    conn.execute(
+        "INSERT INTO games (id, season, week, season_type, start_date, completed, "
+        "neutral_site, home_team, away_team, home_points, away_points) VALUES "
+        "(1, 2024, 1, 'regular', NULL, 1, 0, 'A', 'X', 30, 10), "
+        "(2, 2024, 2, 'regular', NULL, 1, 0, 'A', 'Y', 10, 30)"
+    )
+    conn.execute(
+        "INSERT INTO team_game_stats (game_id, team, success_rate, ppa) VALUES "
+        "(1, 'A', 0.9, 0.5), (2, 'A', 0.5, 0.5)"
+    )
+    conn.commit()
+
+    features = build_features(conn, 2024, 3, "A", "B")
+
+    assert features["success_rate_diff"] < 0.7

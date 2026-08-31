@@ -13,10 +13,10 @@ from cfb_picks.model import (
 
 def test_train_and_predict_recovers_simple_relationship():
     feature_dicts = [
-        {"elo_diff": 100, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0},
-        {"elo_diff": -100, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0},
-        {"elo_diff": 200, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0},
-        {"elo_diff": 0, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0},
+        {"elo_diff": 100, "success_rate_diff": 0, "ppa_diff": 0, "talent_diff": 0, "neutral_site": 0},
+        {"elo_diff": -100, "success_rate_diff": 0, "ppa_diff": 0, "talent_diff": 0, "neutral_site": 0},
+        {"elo_diff": 200, "success_rate_diff": 0, "ppa_diff": 0, "talent_diff": 0, "neutral_site": 0},
+        {"elo_diff": 0, "success_rate_diff": 0, "ppa_diff": 0, "talent_diff": 0, "neutral_site": 0},
     ]
     margins = [10, -10, 20, 0]
 
@@ -24,14 +24,23 @@ def test_train_and_predict_recovers_simple_relationship():
 
     assert weights.coefficients["elo_diff"] == pytest.approx(0.1, abs=0.02)
     predicted = predict_margin(
-        weights, {"elo_diff": 150, "success_rate_diff": 0, "ppa_diff": 0, "neutral_site": 0}
+        weights,
+        {"elo_diff": 150, "success_rate_diff": 0, "ppa_diff": 0, "talent_diff": 0, "neutral_site": 0},
     )
     assert predicted == pytest.approx(15, abs=3)
 
 
 def test_save_and_load_model_roundtrip(tmp_path):
     weights = train_model(
-        [{"elo_diff": 100, "success_rate_diff": 0.1, "ppa_diff": 0.2, "neutral_site": 0}],
+        [
+            {
+                "elo_diff": 100,
+                "success_rate_diff": 0.1,
+                "ppa_diff": 0.2,
+                "talent_diff": 50,
+                "neutral_site": 0,
+            }
+        ],
         [10],
     )
     path = tmp_path / "model.json"

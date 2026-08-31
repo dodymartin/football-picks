@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS team_game_stats (
     PRIMARY KEY (game_id, team)
 );
 
+CREATE TABLE IF NOT EXISTS team_talent (
+    season INTEGER NOT NULL,
+    team TEXT NOT NULL,
+    talent REAL,
+    PRIMARY KEY (season, team)
+);
+
 CREATE TABLE IF NOT EXISTS elo_ratings (
     season INTEGER NOT NULL,
     week INTEGER NOT NULL,

@@ -10,7 +10,7 @@ def test_init_db_creates_tables(tmp_path):
     }
     expected = {
         "teams", "team_aliases", "games", "betting_lines",
-        "team_game_stats", "elo_ratings", "picks",
+        "team_game_stats", "team_talent", "elo_ratings", "picks",
     }
     assert expected.issubset(tables)
 

@@ -92,6 +92,16 @@ def upsert_team_game_stats(conn, stats_json):
     conn.commit()
 
 
+def upsert_team_talent(conn, talent_json):
+    rows = [(t["year"], t["team"], t.get("talent")) for t in talent_json]
+    conn.executemany(
+        "INSERT INTO team_talent (season, team, talent) VALUES (?, ?, ?) "
+        "ON CONFLICT(season, team) DO UPDATE SET talent=excluded.talent",
+        rows,
+    )
+    conn.commit()
+
+
 def fetch_data(conn, client, years):
     for year in years:
         teams = client.get_fbs_teams(year)
@@ -106,3 +116,6 @@ def fetch_data(conn, client, years):
 
         stats = client.get_advanced_game_stats(year)
         upsert_team_game_stats(conn, stats)
+
+        talent = client.get_talent(year)
+        upsert_team_talent(conn, talent)

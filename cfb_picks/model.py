@@ -6,7 +6,7 @@ from sklearn.linear_model import Ridge
 from .elo import is_fbs_team
 from .features import build_features
 
-FEATURE_ORDER = ["elo_diff", "success_rate_diff", "ppa_diff", "neutral_site"]
+FEATURE_ORDER = ["elo_diff", "success_rate_diff", "ppa_diff", "talent_diff", "neutral_site"]
 
 
 @dataclass
