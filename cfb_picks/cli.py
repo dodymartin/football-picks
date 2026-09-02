@@ -181,7 +181,7 @@ def predict_cmd(input_path, season, week):
             pick.is_best_pick = False
         all_candidates = picks + other_picks
         if all_candidates:
-            best = max(all_candidates, key=lambda pick: confidence_score(pick, calibration))
+            best = rank_by_confidence(all_candidates, calibration)[0]
             best.is_best_pick = True
             if any(best is other for other in other_picks):
                 conn.execute(
