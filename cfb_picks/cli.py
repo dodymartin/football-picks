@@ -217,11 +217,12 @@ def predict_cmd(input_path, season, week):
         )
     conn.commit()
 
-    for pick in sorted(picks, key=lambda p: abs(p.edge), reverse=True):
+    for pick in rank_by_confidence(picks, calibration):
         marker = " *** BEST PICK ***" if pick.is_best_pick else ""
         click.echo(
             f"{pick.away_team} @ {pick.home_team} ({pick.spread:+}): "
-            f"pick {pick.pick_team} (edge {pick.edge:+.1f}){marker}"
+            f"pick {pick.pick_team} (edge {pick.edge:+.1f}, "
+            f"confidence {confidence_score(pick, calibration):.1f}){marker}"
         )
 
 
